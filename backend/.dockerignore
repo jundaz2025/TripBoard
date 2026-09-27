@@ -1,0 +1,8 @@
+# Keep local Python environments, credentials, uploads, and test artifacts out of the backend build context.
+.venv
+.env
+uploads
+__pycache__
+.pytest_cache
+tests
+*.db

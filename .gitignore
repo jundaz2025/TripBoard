@@ -1,0 +1,30 @@
+# Local environment values stay private; sanitized examples remain publishable.
+.env
+.env.*
+!.env.example
+
+# Python environments, bytecode, databases, and tool caches are machine-local.
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+*.db
+
+# Dependencies and generated frontend/coverage output can be recreated from source.
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+htmlcov/
+.coverage
+.coverage.*
+
+# User attachments and local snapshots can contain private trip or account data.
+uploads/
+.backups/
+
+# Operating-system metadata and runtime logs do not belong in the repository.
+.DS_Store
+*.log

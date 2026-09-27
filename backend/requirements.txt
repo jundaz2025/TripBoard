@@ -1,0 +1,9 @@
+# Runtime dependencies and the test runner; requirements.lock.txt records the fully resolved environment.
+fastapi[standard]==0.141.1
+SQLAlchemy==2.0.54
+psycopg[binary]==3.3.6
+python-dotenv>=1,<2
+redis>=5,<7
+httpx==0.28.1
+ortools>=9.11,<10
+pytest>=8,<10

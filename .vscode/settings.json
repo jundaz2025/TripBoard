@@ -1,0 +1,5 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/bin/python",
+  "files.exclude": {"**/__pycache__": true, "**/.pytest_cache": true},
+  "search.exclude": {"**/node_modules": true, "**/.venv": true, ".backups": true}
+}

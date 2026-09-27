@@ -1,0 +1,4 @@
+# Exclude local dependencies and build output; frontend environment files may contain only public browser settings.
+node_modules
+dist
+.env

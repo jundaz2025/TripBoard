@@ -1,0 +1,7 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "TripBoard: start everything", "type": "shell", "command": "bash scripts/dev.sh", "problemMatcher": [], "isBackground": true, "presentation": {"reveal": "always", "panel": "dedicated"}},
+    {"label": "TripBoard: run checks", "type": "shell", "command": "bash scripts/check.sh", "problemMatcher": [], "group": "test"}
+  ]
+}

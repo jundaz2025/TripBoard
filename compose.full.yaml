@@ -1,0 +1,37 @@
+# Overlay compose.yaml with the API, reminder worker, and web server for local container deployment.
+services:
+  api:
+    build: ./backend
+    # The worker shares these settings through the YAML alias below; values come from Compose, not backend/.env.
+    environment: &app-env
+      DATABASE_URL: postgresql+psycopg://tripboard:${POSTGRES_PASSWORD:-tripboard_local_dev}@db:5432/tripboard
+      REDIS_URL: redis://redis:6379/0
+      APP_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OSRM_URL: ${OSRM_URL:-https://router.project-osrm.org}
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    volumes:
+      # Container attachments use this volume, separate from local backend/uploads.
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  worker:
+    build: ./backend
+    command: ["python", "-m", "app.worker"]
+    environment: *app-env
+    depends_on:
+      api: {condition: service_healthy}
+  web:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      api: {condition: service_healthy}
+volumes:
+  uploads:
