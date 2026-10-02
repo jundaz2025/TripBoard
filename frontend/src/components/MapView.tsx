@@ -12,7 +12,9 @@ import { useDestination } from "../useDestination";
 import { useLanguage } from "../useLanguage";
 import { buildMapPlan } from "../mapPlan";
 import type { MapPlan } from "../mapPlan";
+import type { LocatedActivities } from "../activityLocation";
 import MapDayLegend from "./MapDayLegend";
+import SavePlaceConfirm from "./SavePlaceConfirm";
 const OpenMap = lazy(() => import("./OpenMap"));
 const GoogleMap = lazy(() => import("./GoogleMap"));
 export type MapProps = {
@@ -23,47 +25,67 @@ export type MapProps = {
   onSelect: (id: string) => void;
   preview?: LocationResult | null;
   destination?: LocationResult | null;
+  overview?: number;
+  savedOverview?: number;
+  focusRevision?: number;
 };
 export default function MapView(
-  props: Omit<MapProps, "plan"> & { editable: boolean; onSaved: (trip: Trip) => void },
+  props: Omit<MapProps, "plan"> & { editable: boolean; onSaved: (trip: Trip) => void; onSelectDay: (day: string) => void; locatedActivities?: LocatedActivities },
 ) {
   useLanguage();
   const [previewResult, setPreviewResult] = useState<{
     destination: string;
+    day: string;
+    focusRevision?: number;
     location: LocationResult;
   } | null>(null);
-  // A search preview belongs to its destination and must not follow the user into another city.
+  // A date selection clears search focus, even when the user clicks the already selected day.
   const preview =
-    previewResult?.destination === props.trip.destination
+    previewResult?.destination === props.trip.destination && previewResult.day === props.day && previewResult.focusRevision === props.focusRevision
       ? previewResult.location
       : null;
   // Rebuild localized marker descriptions without remounting the map or changing the saved trip.
-  const plan = buildMapPlan(props.trip, props.day, preview);
+  const plan = buildMapPlan(props.trip, props.day, preview, props.locatedActivities);
   const [failed, setFailed] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingPlace, setPendingPlace] = useState<{ location: LocationResult; version: number } | null>(null);
+  const [overview, setOverview] = useState<{ context: string; count: number; scope: "all" | "saved" }>({ context: "", count: 0, scope: "all" });
+  const context = JSON.stringify([props.trip.id, props.day, props.selected, preview?.lat, preview?.lon, props.focusRevision]);
+  const showAll = overview.context === context && overview.scope === "all" ? overview.count : 0;
+  const showSaved = overview.context === context && overview.scope === "saved" && plan.hasUnscheduled ? overview.count : 0;
+  function showPlaces(scope: "all" | "saved") {
+    setPreviewResult(null);
+    props.onSelect("");
+    // Clear any previous pin/search focus, and make repeat clicks recenter after a manual pan.
+    setOverview(previous => ({
+      context: JSON.stringify([props.trip.id, props.day, "", undefined, undefined, props.focusRevision]),
+      count: previous.count + 1, scope,
+    }));
+  }
   const destination = useDestination(
     props.trip.destination,
-    !preview && !props.trip.places.length && !props.trip.hotels.length,
+    true,
     props.trip.destination_location,
   );
   const onError = useCallback(() => setFailed(true), []);
   // MapLibre is used without a key or after Google fails; place search remains a separate service.
   const google = Boolean(googleMapsKey) && !failed;
   async function save() {
-    if (!preview) return;
+    if (!pendingPlace || busy) return;
     setBusy(true);
     setError("");
     try {
       const next = await api<Trip>(
         `/trips/${props.trip.id}/items/places`,
         "POST",
-        placeFromResult(preview),
-        props.trip.version,
+        placeFromResult(pendingPlace.location),
+        pendingPlace.version,
       );
       props.onSaved(next);
       props.onSelect(next.places[next.places.length - 1].id);
       setPreviewResult(null);
+      setPendingPlace(null);
     } catch (e) {
       setError(message(e));
     } finally {
@@ -99,6 +121,8 @@ export default function MapView(
         onSelect={(r) => {
           setPreviewResult({
             destination: props.trip.destination,
+            day: props.day,
+            focusRevision: props.focusRevision,
             location: r,
           });
           setError("");
@@ -111,7 +135,7 @@ export default function MapView(
             <small>{preview.address}</small>
           </span>
           {props.editable && (
-            <button disabled={busy} onClick={save}>
+            <button disabled={busy} onClick={() => { setError(""); setPendingPlace({ location: preview, version: props.trip.version }); }}>
               <Plus size={15} />
               {busy ? tr("Saving…") : tr("Save place")}
             </button>
@@ -133,7 +157,12 @@ export default function MapView(
       {failed && (
         <p className="map-provider-note" role="status">{tr("Google Maps is unavailable. Showing OpenStreetMap instead.")}</p>
       )}
-      <MapDayLegend plan={plan} />
+      <div className="map-view-actions">
+        <button type="button" className="secondary compact" aria-pressed={Boolean(showAll)}
+          onClick={() => showPlaces("all")}>{tr("Show all places")}</button>
+      </div>
+      <MapDayLegend plan={plan} onSelectDay={props.onSelectDay} onSelectSaved={() => showPlaces("saved")}
+        focus={showSaved ? "saved" : showAll ? "all" : "day"} />
       <Suspense
         fallback={<div className="map-panel loading-page">{tr("Loading map…")}</div>}
       >
@@ -141,6 +170,8 @@ export default function MapView(
           <GoogleMap
             {...props}
             plan={plan}
+            overview={showAll}
+            savedOverview={showSaved}
             preview={preview}
             destination={destination.location}
             onError={onError}
@@ -149,6 +180,8 @@ export default function MapView(
           <OpenMap
             {...props}
             plan={plan}
+            overview={showAll}
+            savedOverview={showSaved}
             preview={preview}
             destination={destination.location}
           />
@@ -157,6 +190,8 @@ export default function MapView(
       {!googleMapsKey && (
         <p className="map-provider-note">{tr("Google Maps is available after a Maps API key is configured.")}</p>
       )}
+      {pendingPlace && <SavePlaceConfirm name={pendingPlace.location.name} address={pendingPlace.location.address}
+        busy={busy} error={error} onConfirm={() => void save()} onCancel={() => { setPendingPlace(null); setError(""); }} />}
     </section>
   );
 }

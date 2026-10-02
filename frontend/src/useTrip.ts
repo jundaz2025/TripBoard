@@ -1,113 +1,116 @@
-// Keeps one selected trip synchronized through authoritative snapshots, WebSocket wake-ups and polling fallback.
+// Keep one trip synchronized, and discard its data as soon as the server revokes access.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, message } from "./api";
+import { api } from "./api";
+import { TripSyncSession } from "./tripSync";
+import type { AccessLoss } from "./tripSync";
 import type { Trip, Change } from "./types";
-export function useTrip(id: string | null) {
+
+export function useTrip(id: string | null, onUnavailable: (id: string, reason: AccessLoss) => void) {
   const [trip, setTrip] = useState<Trip | null>(null);
   const [connection, setConnection] = useState("Connecting");
   const [error, setError] = useState("");
   const [events, setEvents] = useState<Change[]>([]);
-  const version = useRef(0);
-  const active = useRef(id);
-  const accept = useCallback((next: Trip) => {
-    // Ignore late responses from a previous trip and snapshots older than an accepted version.
-    if (next.id !== active.current || next.version <= version.current) return;
-    version.current = next.version;
-    setTrip(next);
-  }, []);
-  const refresh = useCallback(async () => {
-    if (!id) return;
-    const result = await api<{ snapshot: Trip; events: Change[] }>(
-      `/trips/${id}/sync?since=${version.current}`,
-    );
-    if (active.current !== id) return;
-    accept(result.snapshot);
-    setError("");
-    // Reconnects and polling may replay events; version is the stable deduplication key.
-    if (result.events.length)
-      setEvents((prev) =>
-        [
-          ...new Map(
-            [...prev, ...result.events].map((e) => [e.version, e]),
-          ).values(),
-        ]
-          .sort((a, b) => b.version - a.version)
-          .slice(0, 30),
-      );
-  }, [id, accept]);
+  const current = useRef<TripSyncSession | null>(null);
+  const accept = useCallback((next: Trip) => current.current?.accept(next), []);
+  const refresh = useCallback(async () => { await current.current?.refresh(); }, []);
+  const leave = useCallback(async (userId: string, version: number) => {
+    const session = current.current;
+    if (!id || !session?.active) return;
+    await api(`/trips/${id}/members/${userId}`, "DELETE", undefined, version);
+    // Capture the session before awaiting: a delayed response must never evict a different trip.
+    session.revoke("left");
+  }, [id]);
+
   useEffect(() => {
-    active.current = id;
-    version.current = 0;
     setTrip(null);
     setEvents([]);
     setError("");
     if (!id) return;
-    let closed = false,
-      socket: WebSocket | null = null,
-      retry: ReturnType<typeof setTimeout>,
-      delay = 1000;
-    const load = () =>
-      refresh().catch((e) => {
-        if (!closed) setError(message(e));
-      });
-    const connect = () => {
-      if (closed) return;
-      setConnection(navigator.onLine ? "Connecting" : "Offline");
-      socket = new WebSocket(
-        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/trips/${id}/live`,
-      );
-      socket.onopen = () => {
-        delay = 1000;
-        setConnection("Live");
-        load();
-      };
-      socket.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          // Socket messages announce change only. Fetching a snapshot keeps recovery idempotent.
-          if (data.type === "changed" || data.type === "sync") load();
-        } catch {
-          /* A malformed event never alters local data. */
-        }
-      };
-      socket.onclose = (e) => {
-        if (closed) return;
-        setConnection(navigator.onLine ? "Reconnecting" : "Offline");
-        if (e.code === 1008) {
-          setError(
-            "Access changed or your session expired. Refresh the page to sign in again.",
-          );
-          return;
-        }
-        // Back off after disconnects instead of creating a tight reconnect loop.
-        retry = setTimeout(connect, delay);
-        delay = Math.min(delay * 2, 15000);
-      };
-      socket.onerror = () => socket?.close();
-    };
-    load();
-    connect();
-    // Periodic sync repairs missed Pub/Sub messages and remains useful when Redis is unavailable.
-    const poll = setInterval(load, 10000);
-    const online = () => {
-      load();
-      if (!socket || socket.readyState === WebSocket.CLOSED) {
-        clearTimeout(retry);
-        connect();
-      }
-    };
-    const offline = () => setConnection("Offline");
-    window.addEventListener("online", online);
-    window.addEventListener("offline", offline);
-    return () => {
-      // Dispose all timers/listeners so switching trips cannot leave a second synchronization loop running.
-      closed = true;
+    let socket: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let delay = 1000;
+    const stopTransport = () => {
       clearInterval(poll);
       clearTimeout(retry);
       socket?.close();
       window.removeEventListener("online", online);
       window.removeEventListener("offline", offline);
     };
-  }, [id, refresh]);
-  return { trip, accept, refresh, connection, error, events };
+    const session = new TripSyncSession(id, {
+      fetch: version => api(`/trips/${id}/sync?since=${version}`),
+      onSnapshot: setTrip,
+      onEvents: incoming => {
+        // Reconnects and polling may replay events; version is the stable deduplication key.
+        if (incoming.length) setEvents(prev => [...new Map(
+          [...prev, ...incoming].map(event => [event.version, event]),
+        ).values()].sort((a, b) => b.version - a.version).slice(0, 30));
+      },
+      onError: setError,
+      onUnavailable: reason => {
+        stopTransport();
+        setTrip(null);
+        setEvents([]);
+        setError("");
+        onUnavailable(id, reason);
+      },
+    });
+    current.current = session;
+    const load = () => { void session.refresh(); };
+    const connect = () => {
+      if (!session.active) return;
+      setConnection(navigator.onLine ? "Connecting" : "Offline");
+      socket = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/trips/${id}/live`,
+      );
+      socket.onopen = () => {
+        if (!session.active) return;
+        delay = 1000;
+        setConnection("Live");
+        load();
+      };
+      socket.onmessage = event => {
+        if (!session.active) return;
+        try {
+          const data = JSON.parse(event.data);
+          // Socket messages announce changes only; HTTP snapshots independently recheck membership.
+          if (data.type === "changed" || data.type === "sync") load();
+        } catch { /* A malformed event never alters local data. */ }
+      };
+      socket.onclose = event => {
+        if (!session.active) return;
+        if (event.code === 1008) {
+          // A policy close is authoritative. Clear the screen even if HTTP is currently unavailable.
+          session.revoke();
+          return;
+        }
+        setConnection(navigator.onLine ? "Reconnecting" : "Offline");
+        retry = setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 15000);
+      };
+      socket.onerror = () => socket?.close();
+    };
+    const online = () => {
+      if (!session.active) return;
+      load();
+      if (!socket || socket.readyState === WebSocket.CLOSED) {
+        clearTimeout(retry);
+        connect();
+      }
+    };
+    const offline = () => { if (session.active) setConnection("Offline"); };
+    load();
+    connect();
+    // Polling remains an access check when WebSockets or Redis are unavailable.
+    poll = setInterval(load, 10000);
+    window.addEventListener("online", online);
+    window.addEventListener("offline", offline);
+    return () => {
+      session.stop();
+      stopTransport();
+      if (current.current === session) current.current = null;
+    };
+  }, [id, onUnavailable]);
+  // Do not show a previous trip for the render before effect cleanup runs.
+  return { trip: trip?.id === id ? trip : null, accept, refresh, leave, connection, error, events };
 }

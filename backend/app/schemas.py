@@ -91,6 +91,17 @@ class TripInput(Schema):
         return self
 
 
+class TripUpdate(TripInput):
+    """Require an explicit date policy when an existing itinerary changes dates."""
+    activity_date_mode: Literal["keep", "shift"] | None = None
+
+
+class RescheduleActivities(Schema):
+    """Move a reviewed set of flexible activities together, preserving their spacing."""
+    activity_ids: list[str] = Field(min_length=1, max_length=100)
+    first_day: date
+
+
 class PlaceInput(Schema):
     """Validate coordinates and optional planning constraints for a reusable saved place."""
     title: str = Field(min_length=1, max_length=160)
@@ -112,6 +123,12 @@ class PlaceInput(Schema):
         return self
 
 
+class MapLocation(Schema):
+    """An activity can keep its map coordinates independently of the Saved places collection."""
+    lat: float = Field(ge=-90, le=90, allow_inf_nan=False)
+    lon: float = Field(ge=-180, le=180, allow_inf_nan=False)
+
+
 class ActivityInput(Schema):
     """Validate one daily activity; cross-record rules are applied in planning.py."""
     title: str = Field(min_length=1, max_length=160)
@@ -122,6 +139,7 @@ class ActivityInput(Schema):
     duration: int = Field(default=60, ge=5, le=1440)
     locked: bool = False
     place_id: str | None = None
+    map_location: MapLocation | None = None
     reminder_minutes: int | None = Field(default=30, ge=0, le=10080)
 
     @model_validator(mode="after")
@@ -244,6 +262,11 @@ class InviteInput(Schema):
 class JoinInput(Schema):
     """Accept the opaque invitation token, whose digest and expiry are checked server-side."""
     token: str
+
+
+class TransferManagerInput(Schema):
+    """Transfer management to an existing member rather than granting it through an invitation."""
+    user_id: str = Field(min_length=1, max_length=128)
 
 
 class AIInput(Schema):

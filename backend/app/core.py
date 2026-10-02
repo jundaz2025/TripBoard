@@ -93,11 +93,12 @@ def current_user(tb_session: str | None = Cookie(default=None), db=Depends(db_se
     return user
 
 
-def permit(db, user, board_id, edit=False, owner=False):
+def permit(db, user, board_id, edit=False, owner=False, lock=False):
     """Hide nonmember trips and enforce viewer/editor/owner permissions on the server."""
     from .models import Board, Member
 
-    board = db.get(Board, board_id)
+    # Membership writes lock the board first so transfers and removals use the same lock order.
+    board = db.get(Board, board_id, with_for_update=lock, populate_existing=lock)
     member = db.get(Member, (board_id, user.id))
     if not board or not member:
         raise HTTPException(404, "Trip not found.")

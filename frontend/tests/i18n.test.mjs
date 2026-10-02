@@ -44,7 +44,7 @@ test('time-zone labels change but option values remain the same IANA identifiers
   setLanguage('en');
 });
 test('language changes leave saved places, day colors and separate route coordinates unchanged', () => {
-  const trip={start_date:'2026-09-23',hotels:[],places:[{id:'a',title:'New York',lon:-74,lat:40},{id:'b',title:'Central Park',lon:-73,lat:41}],activities:[{id:'one',day:'2026-09-23',start:'09:00',place_id:'a'},{id:'two',day:'2026-09-23',start:'11:00',place_id:'b'}]};
+  const trip={start_date:'2026-09-23',end_date:'2026-09-25',hotels:[],places:[{id:'a',title:'New York',lon:-74,lat:40},{id:'b',title:'Central Park',lon:-73,lat:41}],activities:[{id:'one',day:'2026-09-23',start:'09:00',place_id:'a'},{id:'two',day:'2026-09-23',start:'11:00',place_id:'b'}]};
   const before=JSON.stringify(trip);
   setLanguage('en'); const en=buildMapPlan(trip,trip.start_date);
   setLanguage('zh'); const cn=buildMapPlan(trip,trip.start_date);

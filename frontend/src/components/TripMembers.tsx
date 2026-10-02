@@ -119,7 +119,7 @@ export default function TripMembers({ members, currentUserId, onViewMembers }: P
                 <div className="member-popover-person">
                   <strong>{member.name}{member.id === currentUserId && <span className="member-self">{tr(" (you)")}</span>}</strong>
                   <small>{member.email}</small>
-                  <span className="member-popover-role">{tr(member.role)}</span>
+                  <span className="member-popover-role">{tr(member.role === "owner" ? "Manager" : member.role)}</span>
                 </div>
               </li>
             ))}

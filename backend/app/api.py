@@ -46,6 +46,7 @@ from .models import (
     Document,
     Notification,
     Setting,
+    manager_index,
 )
 from .schemas import (
     Register,
@@ -53,18 +54,23 @@ from .schemas import (
     ActivityWrite,
     Credentials,
     TripInput,
+    TripUpdate,
+    RescheduleActivities,
     TransportInput,
     ActivityInput,
+    MapLocation,
     PlaceInput,
     HotelInput,
     HotelPolicyInput,
     InviteInput,
     JoinInput,
+    TransferManagerInput,
     AIInput,
     RouteInput,
 )
 from .planning import validate_activity, apply_operations, conflicts, instant
 from .service import snapshot, commit_change, new_board, import_legacy
+from .trip_dates import change_dates, reschedule
 from .sync import publish, redis
 from . import ai, optimizer, providers, hotel_policy, hotel_discovery
 
@@ -73,6 +79,8 @@ from . import ai, optimizer, providers, hotel_policy, hotel_discovery
 async def lifespan(app):
     """Initialize missing local-development tables and uploads without dropping existing data."""
     Base.metadata.create_all(engine)
+    # create_all skips indexes on existing tables; install this additive guard on older databases too.
+    manager_index.create(engine, checkfirst=True)
     UPLOADS.mkdir(parents=True, exist_ok=True)
     with Session() as db:
         if not db.get(Setting, "legacy_claimed"):
@@ -377,16 +385,35 @@ def sync(
 @app.put("/api/trips/{trip_id}")
 async def edit_trip(
     trip_id: str,
-    data: TripInput,
+    data: TripUpdate,
     tasks: BackgroundTasks,
     v=Depends(version),
     user=Depends(current_user),
     db=Depends(db_session),
 ):
-    """Merge validated trip settings into current state and reject a stale editing version."""
+    """Apply an explicitly reviewed date policy atomically with trip settings."""
     b, m = permit(db, user, trip_id, edit=True)
-    state = {**b.state, **(await cities.trip_fields(data))}
+    # The policy is a command, never a persisted trip field or city-provider input.
+    fields = await cities.trip_fields(TripInput.model_validate(data.model_dump(exclude={"activity_date_mode"})))
+    state = change_dates(b.state, fields, data.activity_date_mode)
     commit_change(db, b, v, state, user, "trip.updated")
+    tasks.add_task(publish, trip_id)
+    return snapshot(db, b, m)
+
+
+@app.post("/api/trips/{trip_id}/reschedule-activities")
+def reschedule_activities(
+    trip_id: str,
+    data: RescheduleActivities,
+    tasks: BackgroundTasks,
+    v=Depends(version),
+    user=Depends(current_user),
+    db=Depends(db_session),
+):
+    """Recover selected old activities without shifting reservations or newer activities."""
+    b, m = permit(db, user, trip_id, edit=True)
+    state = reschedule(b.state, data.activity_ids, data.first_day)
+    commit_change(db, b, v, state, user, "activities.rescheduled")
     tasks.add_task(publish, trip_id)
     return snapshot(db, b, m)
 
@@ -426,7 +453,7 @@ SCHEMAS = {"activities": ActivityWrite, "places": PlaceInput, "hotels": HotelInp
 
 
 def bind_activity_place(item, state):
-    """Deduplicate a selected address and save it together with its activity in one transaction."""
+    """Keep activity coordinates even when the user chooses not to save a reusable place."""
     if item.new_place:
         if item.place_id:
             raise HTTPException(422, "Choose a saved place or a new address, not both.")
@@ -450,6 +477,9 @@ def bind_activity_place(item, state):
             state["places"].append({"id": item.place_id, **p})
         item.location = p["location"]
     validate_activity(item, state)
+    if item.place_id:
+        place = next(p for p in state["places"] if p["id"] == item.place_id)
+        item.map_location = MapLocation(lat=place["lat"], lon=place["lon"])
 
 
 def parse_item(kind, data):
@@ -544,7 +574,7 @@ def delete_item(
     user=Depends(current_user),
     db=Depends(db_session),
 ):
-    """Reject dangling place references and remove hotel attachments only after the versioned commit."""
+    """Detach deleted places from activities and remove hotel files after the versioned commit."""
     b, m = permit(db, user, trip_id, edit=True)
     if kind not in SCHEMAS:
         raise HTTPException(404, "Collection not found.")
@@ -552,11 +582,13 @@ def delete_item(
     state.setdefault("transports", [])
     if not any(r["id"] == item_id for r in state[kind]):
         raise HTTPException(404, "Item not found.")
-    if kind == "places" and any(a["place_id"] == item_id for a in state["activities"]):
-        raise HTTPException(
-            409,
-            "This place is used by an activity. Remove or reassign the activity first.",
-        )
+    if kind == "places":
+        # Removing a saved place must not delete the user's scheduled activities or leave dangling IDs.
+        place = next(p for p in state["places"] if p["id"] == item_id)
+        for activity in state["activities"]:
+            if activity.get("place_id") == item_id:
+                activity["map_location"] = {"lat": place["lat"], "lon": place["lon"]}
+                activity["place_id"] = None
     state[kind] = [r for r in state[kind] if r["id"] != item_id]
     removed_docs = (
         db.scalars(
@@ -628,14 +660,49 @@ def member_role(
     db=Depends(db_session),
 ):
     """Allow only the owner to change nonowner roles and record the change under a new trip version."""
-    b, _ = permit(db, user, trip_id, owner=True)
+    b, _ = permit(db, user, trip_id, owner=True, lock=True)
     m = db.get(Member, (trip_id, user_id))
     if not m or m.role == "owner":
-        raise HTTPException(422, "The trip owner role cannot be changed.")
+        raise HTTPException(422, "Use Transfer manager to change the trip manager.")
     m.role = data.role
     commit_change(db, b, v, b.state, user, "member.role_changed")
     tasks.add_task(publish, trip_id)
     return {"ok": True}
+
+
+@app.post("/api/trips/{trip_id}/transfer-manager")
+def transfer_manager(
+    trip_id: str,
+    data: TransferManagerInput,
+    tasks: BackgroundTasks,
+    v=Depends(version),
+    user=Depends(current_user),
+    db=Depends(db_session),
+):
+    """Swap the sole manager atomically, then keep the former manager as an editor."""
+    b, current = permit(db, user, trip_id, owner=True, lock=True)
+    successor = db.get(Member, (trip_id, data.user_id))
+    if not successor or successor.user_id == user.id:
+        raise HTTPException(422, "Choose another current trip member as manager.")
+    if v != b.version:
+        raise HTTPException(409, "The trip changed. Reopen Transfer manager and try again.")
+    # Claim the version before touching memberships, including on SQLite where row locks are unavailable.
+    claimed = db.execute(
+        update(Board).where(Board.id == trip_id, Board.version == v)
+        .values(version=v + 1).execution_options(synchronize_session=False)
+    )
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(409, "The trip changed. Reopen Transfer manager and try again.")
+    current.role = "editor"
+    # Flush the demotion first for the unique index. No other session sees this intermediate state.
+    db.flush()
+    successor.role = "owner"
+    db.add(Change(board_id=trip_id, version=v + 1, actor=user.name, kind="manager.transferred"))
+    db.commit()
+    db.refresh(b)
+    tasks.add_task(publish, trip_id)
+    return snapshot(db, b, current)
 
 
 @app.delete("/api/trips/{trip_id}/members/{user_id}")
@@ -647,18 +714,20 @@ def remove_member(
     user=Depends(current_user),
     db=Depends(db_session),
 ):
-    """Revoke a nonowner's membership and reminders, then notify connected clients."""
-    b, _ = permit(db, user, trip_id, owner=True)
+    """Let guests leave voluntarily; only owners may remove another member."""
+    leaving = user_id == user.id
+    b, _ = permit(db, user, trip_id, owner=not leaving, lock=True)
     m = db.get(Member, (trip_id, user_id))
     if not m or m.role == "owner":
-        raise HTTPException(422, "The trip owner cannot be removed.")
+        raise HTTPException(422, "Transfer management to another member before leaving the trip.")
     db.delete(m)
     db.execute(
         delete(Notification).where(
             Notification.board_id == trip_id, Notification.user_id == user_id
         )
     )
-    commit_change(db, b, v, b.state, user, "member.removed")
+    # Membership and reminders are removed atomically; shared plans belong to the trip.
+    commit_change(db, b, v, b.state, user, "member.left" if leaving else "member.removed")
     tasks.add_task(publish, trip_id)
     return {"ok": True}
 

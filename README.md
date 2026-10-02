@@ -31,7 +31,7 @@ This README describes the implementation reviewed on **September 24, 2026**. The
 | Maps | Currently rendered with **MapLibre GL JS + OpenFreeMap**, using OpenStreetMap data. Destination-centered previews, clickable location markers, 12 predefined day colors and generated colors for later days, a day legend, and separate stop-order lines for each day. Other days remain visible as context; lines never connect different days. |
 | Travel & stays | One tab for hotels and outbound/return journeys: flights, driving, trains, buses, ferries, and other travel. Journeys retain departure/arrival dates and their separate local time zones. |
 | Hotels | Reservation details, booking links, notes, and PDF/PNG/JPEG attachments up to 10 MB each. Hotel selection attempts to discover published check-in/out times automatically and shows its source when available. Times remain editable. |
-| Collaboration | Owner/editor/viewer roles, single-use invitations that expire after 24 hours, live updates, reconnection recovery, version-conflict protection, and change history. Clicking the header avatars shows names, emails, roles, and the current-user marker. |
+| Collaboration | Manager/editor/viewer roles, single-use invitations that expire after 24 hours, live updates, reconnection recovery, version-conflict protection, and change history. Every trip has exactly one Manager, who can transfer management to another member. Editors and viewers can leave voluntarily. Clicking the header avatars shows names, emails, roles, and the current-user marker. |
 | Planning assistant | Route optimization and optional AI proposals for itinerary edits, a draft plan, or a stop that fits a free time window. Proposals are reviewed before application. |
 | Reminders | A persistent in-app inbox for activity and hotel reminders. Hotel reminders use the saved check-in/out times, two hours in advance, in the trip time zone. Missing hotel times do not get guessed defaults. |
 | Languages | English/Chinese interface switching, a remembered browser preference, and preserved form drafts when switching languages. User-entered names and notes are left unchanged. |
@@ -75,6 +75,7 @@ Use two independent browser sessions on the same computer:
 4. Join the invitation and open the same trip in both sessions.
 5. Add or edit an activity in one session and observe the saved change in the other.
 6. Click the avatar stack to verify both members and their roles. Try a separate **Viewer** invitation to verify read-only access.
+7. In **People → Transfer manager**, account A selects account B and confirms. B becomes the only Manager; A becomes an Editor and can choose **Leave trip**. Confirm that A returns to their workspace while B keeps the shared plan. A sole Manager must invite another member before transferring or leaving.
 
 Two ordinary tabs in the same browser share a login cookie and do not represent two accounts. Each new member needs a fresh invitation because invitations are single-use and expire after 24 hours.
 

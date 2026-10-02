@@ -8,15 +8,21 @@ maplibregl.setWorkerUrl(workerUrl);
 import type { MapProps } from "./MapView";
 import { mapRouteData } from "../mapPlan";
 import { createMapPin } from "../mapPins";
+import { cameraRequest, CameraController } from "../mapCamera";
 export default function OpenMap({
   plan,
   selected,
   onSelect,
   preview,
   destination,
+  trip,
+  overview,
+  savedOverview,
+  focusRevision,
 }: MapProps) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
+  const camera = useRef(new CameraController());
   const markers = useRef<maplibregl.Marker[]>([]);
   const [error, setError] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -32,6 +38,9 @@ export default function OpenMap({
         style: "https://tiles.openfreemap.org/styles/positron",
       });
       map.current = m;
+      // Programmatic camera animations have no original input event.
+      m.on("movestart", event => { if (event.originalEvent) camera.current.interact(); });
+      m.on("zoomstart", event => { if (event.originalEvent) camera.current.interact(); });
       m.addControl(
         new maplibregl.NavigationControl({ showCompass: false }),
         "top-right",
@@ -106,45 +115,19 @@ export default function OpenMap({
     m.setPaintProperty("order", "line-color", ["get", "color"]);
     m.setPaintProperty("order", "line-opacity", ["get", "opacity"]);
     m.setPaintProperty("order", "line-width", ["get", "width"]);
-    const focus = preview ?? points.find((p) => p.id === selected);
-    if (focus)
-      m.easeTo({ center: [focus.lon, focus.lat], zoom: 14, duration: 500 });
-    else if (points.length) {
+  }, [plan, loaded, selected, onSelect]);
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !loaded) return;
+    const target = camera.current.next(cameraRequest({ plan, tripId: trip.id, city: trip.destination, selected, preview, destination, overview, savedOverview, focusRevision }));
+    if (!target) return;
+    if (target.kind === "point") m.easeTo({ center: [target.lon, target.lat], zoom: target.zoom, duration: 500 });
+    else if (target.kind === "bounds") {
       const bounds = new maplibregl.LngLatBounds();
-      points.forEach((p) => bounds.extend([p.lon, p.lat]));
-      m.fitBounds(bounds, { padding: 70, maxZoom: 14, duration: 500 });
-    } else if (destination) {
-      if (destination.bounds) {
-        const [south, north, west, east] = destination.bounds;
-        m.fitBounds(
-          [
-            [west, south],
-            [east, north],
-          ],
-          {
-            padding: 40,
-            maxZoom: 12,
-            duration: 500,
-          },
-        );
-      } else {
-        m.easeTo({
-          center: [destination.lon, destination.lat],
-          zoom: 11,
-          duration: 500,
-        });
-      }
-    } else {
-      m.jumpTo({ center: [0, 20], zoom: 1 });
+      target.coordinates.forEach(coordinate => bounds.extend(coordinate));
+      m.fitBounds(bounds, { padding: target.padding, maxZoom: target.maxZoom, duration: 500 });
     }
-  }, [
-    plan,
-    loaded,
-    selected,
-    onSelect,
-    preview,
-    destination,
-  ]);
+  }, [plan, loaded, selected, preview, destination, trip.id, trip.destination, overview, savedOverview, focusRevision]);
   return (
     <div className="map-panel">
       <div ref={container} className="map-canvas" />

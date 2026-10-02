@@ -1,5 +1,6 @@
 // Shared client representations of server snapshots and proposals; IDs and enum values are never localized.
 export type City = { id: number; name: string; address: string; lat: number; lon: number; timezone: string; country_code: string };
+// The existing API stores "owner"; its user-facing label is Manager.
 export type Role = "owner" | "editor" | "viewer";
 export type User = { id: string; name: string; email: string };
 // Sidebar summaries carry a version; the full Trip below adds collections and server-derived metadata.
@@ -28,6 +29,7 @@ export type Place = {
   closes: string;
   notes: string;
 };
+export type MapLocation = { lat: number; lon: number };
 export type Activity = {
   id: string;
   title: string;
@@ -38,6 +40,7 @@ export type Activity = {
   duration: number;
   locked: boolean;
   place_id: string | null;
+  map_location?: MapLocation | null;
   reminder_minutes: number | null;
 };
 export type Hotel = {

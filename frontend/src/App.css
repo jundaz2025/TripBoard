@@ -1028,6 +1028,17 @@ main {
   font-size: 11px;
   padding: 8px;
 }
+.manager-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 24px 0;
+}
+.manager-card h3 { margin: 0 0 8px; }
+.manager-card p { margin: 4px 0; }
+.manager-recipient { display: grid; gap: 10px; margin: 24px 0; }
 .invite-card {
   margin: 25px 0;
 }
@@ -2295,7 +2306,11 @@ main {
 .map-day-key { margin: 16px 0 12px; }
 .map-day-key ul { display: flex; flex-wrap: wrap; gap: 7px; list-style: none; padding: 0; margin: 0; max-height: 120px; overflow-y: auto; }
 .map-day-key li { display: flex; align-items: center; gap: 6px; border: 1px solid #e1e7e2; border-radius: 7px; padding: 6px 8px; font-size: 11px; color: #52645b; background: #fff; }
-.map-day-key li.active { border-color: #648978; background: #f0f5f0; }
+.map-day-key li.day-choice { padding: 0; border: 0; background: transparent; }
+.map-day-button { display: flex; align-items: center; gap: 6px; border: 1px solid #e1e7e2; border-radius: 7px; padding: 6px 8px; min-height: 34px; font: inherit; color: inherit; background: #fff; }
+.map-day-button[aria-pressed="true"] { border-color: #648978; background: #f0f5f0; }
+.map-day-button:hover:not(:disabled) { border-color: #648978; color: #245e4d; background: #edf3ee; }
+.map-day-button:focus-visible { outline: 2px solid #245e4d; outline-offset: 2px; }
 .map-day-key i { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .map-day-key strong { font-size: 9px; font-weight: 600; }
 .map-day-key p { font-size: 11px; color: #627367; margin: 9px 0 0; line-height: 1.5; }
@@ -2339,3 +2354,14 @@ html[lang="zh-CN"] .eyebrow { letter-spacing: .12em; }
   .auth-language { top: 14px; right: 16px; }
   .auth-form { padding-top: 64px; }
 }
+
+/* Date reviews keep old entries accessible without mixing them into current-day routes. */
+.date-policy { border: 1px solid var(--border, #dce4db); padding: 18px; border-radius: 14px; }
+.date-preview ul, .outside-activities ul { list-style: none; padding: 0; margin: 12px 0; max-height: 260px; overflow-y: auto; }
+.date-preview li { display: grid; gap: 4px; padding: 10px 0; border-bottom: 1px solid #dde4da; }
+.date-preview li span, .outside-activities small { font-size: 13px; }
+.date-warning { color: #92400e; font-weight: 600; }
+.outside-activities { margin: 20px 0; }
+.outside-activities li { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; }
+.outside-activities li small { display: block; margin-top: 4px; }
+.map-view-actions { display: flex; justify-content: flex-end; margin: 12px 0; }

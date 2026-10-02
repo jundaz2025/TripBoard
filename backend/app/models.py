@@ -1,6 +1,6 @@
 """Persistent records. A versioned JSON board holds the itinerary; related tables hold access, history and delivery state."""
 
-from sqlalchemy import String, Integer, ForeignKey, UniqueConstraint, Boolean
+from sqlalchemy import String, Integer, ForeignKey, UniqueConstraint, Boolean, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from .core import Base, JSON, uid, now
 
@@ -45,6 +45,14 @@ class Member(Base):
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
     role: Mapped[str] = mapped_column(String)
+
+
+# Keep the stored role name compatible with existing trips; the UI calls this role Manager.
+# The transfer transaction preserves the required manager; this index rejects a second one.
+manager_index = Index(
+    "uq_members_one_manager", Member.board_id, unique=True,
+    postgresql_where=Member.role == "owner", sqlite_where=Member.role == "owner",
+)
 
 
 class Change(Base):

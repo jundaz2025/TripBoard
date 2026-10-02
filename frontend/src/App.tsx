@@ -1,6 +1,7 @@
+import OutsideActivities from "./components/OutsideActivities";
 // Owns workspace navigation and top-level dialogs; domain writes go through the version-checked API client.
 import { getLocale, tr, translateMessage } from "./i18n";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Compass,
@@ -19,7 +20,6 @@ import {
   Pencil,
   Lock,
   Clock,
-  Map,
   Link,
   Upload,
   FileText,
@@ -51,10 +51,12 @@ import type {
   Notice,
 } from "./types";
 import { useTrip } from "./useTrip";
+import type { AccessLoss } from "./tripSync";
 const MapView = lazy(() => import("./components/MapView"));
 import { useLanguage } from "./useLanguage";
 import LanguageSwitch from "./components/LanguageSwitch";
 import TripMembers from "./components/TripMembers";
+import TransferManager from "./components/TransferManager";
 import Auth from "./components/Auth";
 import AccountSettings from "./components/AccountSettings";
 import Modal from "./components/Modal";
@@ -64,6 +66,10 @@ import TransportPanel from "./components/TransportPanel";
 import TransportCard from "./components/TransportCard";
 import { transportOnDay } from "./travel";
 import { mapDayInfo } from "./mapPlan";
+import { activityCoordinates, activityMapId } from "./activityLocation";
+import type { LocatedActivities } from "./activityLocation";
+import type { LocationResult } from "./locations";
+import ActivityLocationLookup from "./components/ActivityLocationLookup";
 import { humanizeTimeZones, timeZoneLabel } from "./timeZones";
 import ConflictNotice from "./components/ConflictNotice";
 import AssistantPanel from "./components/AssistantPanel";
@@ -89,21 +95,18 @@ export default function App() {
   const [fatal, setFatal] = useState("");
   const [trips, setTrips] = useState<TripInfo[]>([]);
   const [id, setId] = useState<string | null>(null);
-  const {
-    trip,
-    accept,
-    refresh,
-    connection,
-    error: syncError,
-    events,
-  } = useTrip(id);
   const [config, setConfig] = useState<Config | null>(null);
   const [tab, setTab] = useState("itinerary");
   const [day, setDay] = useState("");
+  const [dayFocusRevision, setDayFocusRevision] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
+  const [locatingActivity, setLocatingActivity] = useState<Activity | null>(null);
+  const [locatedActivities, setLocatedActivities] = useState<LocatedActivities>({});
+  const mapColumn = useRef<HTMLDivElement>(null);
   const [editing, setEditing] = useState<Editing | null>(null);
   const [transportEditing, setTransportEditing] = useState<{item?: Transport; direction?: Transport["direction"]} | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [confirmError, setConfirmError] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -114,9 +117,87 @@ export default function App() {
   const [notices, setNotices] = useState<Notice[]>([]);
   const [noticesOpen, setNoticesOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [transferOpen, setTransferOpen] = useState(false);
   const [sidebar, setSidebar] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const unavailableTrips = useRef(new Set<string>());
+  const workspaceRevision = useRef(0);
+  const onTripUnavailable = useCallback((lostId: string, reason: AccessLoss) => {
+    // Evict private content before any network refresh, including dialogs and cached reminders.
+    unavailableTrips.current.add(lostId);
+    const revision = ++workspaceRevision.current;
+    setId(current => current === lostId ? null : current);
+    setTrips(rows => rows.filter(row => row.id !== lostId));
+    setEditing(null);
+    setTransportEditing(null);
+    setConfirm(null);
+    setConfirmError("");
+    setHistoryOpen(false);
+    setTransferOpen(false);
+    setNoticesOpen(false);
+    setNotices(rows => rows.filter(row => row.trip_id !== lostId));
+    setInvite("");
+    setSelected(null);
+    setLocatingActivity(null);
+    setLocatedActivities({});
+    setDay("");
+    setTab("itinerary");
+    setError("");
+    setToast(reason === "left"
+      ? "You left the trip. You are back in your workspace."
+      : "This trip is no longer available. You are back in your workspace.");
+    if (reason === "session") {
+      setUser(null);
+      setTrips([]);
+      setNotices([]);
+      setToast("");
+      return;
+    }
+    // Refresh the sidebar without selecting a different trip or trusting an older list response.
+    api<TripInfo[]>("/trips").then(rows => {
+      if (workspaceRevision.current === revision) {
+        setTrips(rows.filter(row => !unavailableTrips.current.has(row.id)));
+      }
+    }).catch(error => {
+      if (workspaceRevision.current !== revision) return;
+      if (error instanceof ApiError && error.status === 401) {
+        setUser(null);
+        setTrips([]);
+        setNotices([]);
+        setToast("");
+      }
+    });
+  }, []);
+  const { trip, accept, refresh, leave, connection, error: syncError, events } = useTrip(id, onTripUnavailable);
   const selectPlace = useCallback((next: string) => setSelected(next), []);
+  // Both date controls share the itinerary selection; repeat clicks explicitly restore the day's map view.
+  const selectDay = useCallback((next: string) => {
+    setDay(next);
+    setSelected(null);
+    setDayFocusRevision(revision => revision + 1);
+  }, []);
+  const focusMap = useCallback((pointId: string) => {
+    setSelected(pointId);
+    // Every explicit Locate click restores the pin, including after panning away from the same selection.
+    setDayFocusRevision(revision => revision + 1);
+    const panel = mapColumn.current?.querySelector(".map-panel");
+    const bounds = panel?.getBoundingClientRect();
+    if (bounds && (bounds.top < 0 || bounds.bottom > window.innerHeight)) {
+      panel?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, []);
+  const locatedActivity = useCallback((activityId: string, address: string, result: LocationResult) => {
+    setLocatedActivities(previous => ({ ...previous, [activityId]: {
+      address, coordinates: { lat: result.lat, lon: result.lon },
+    } }));
+    setLocatingActivity(null);
+    focusMap(`activity:${activityId}`);
+  }, [focusMap]);
+  function locateActivity(activity: Activity) {
+    if (!trip) return;
+    if (activityCoordinates(activity, trip.places, locatedActivities)) focusMap(activityMapId(activity));
+    else setLocatingActivity(activity);
+  }
   // UI availability is a convenience; every mutation is independently authorized by the API.
   const editable = trip?.role !== "viewer" && connection !== "Offline";
   // An expired session opens login; connection failures must remain visible instead of looking like logout.
@@ -130,7 +211,12 @@ export default function App() {
   }, []);
   // Preserve the selected trip when it still exists; deletion or joining can select a different snapshot.
   const loadTrips = useCallback(async (select?: string) => {
-    const rows = await api<TripInfo[]>("/trips");
+    const revision = workspaceRevision.current;
+    const result = await api<TripInfo[]>("/trips");
+    if (workspaceRevision.current !== revision) return;
+    // An explicitly accepted new invitation may restore access to a previously removed trip.
+    if (select && result.some(row => row.id === select)) unavailableTrips.current.delete(select);
+    const rows = result.filter(row => !unavailableTrips.current.has(row.id));
     setTrips(rows);
     setId(
       (current) =>
@@ -140,18 +226,30 @@ export default function App() {
   }, []);
   useEffect(() => {
     if (!user) return;
+    // Revoked memberships belong to this login, never to another account using the same browser.
+    unavailableTrips.current.clear();
+    workspaceRevision.current += 1;
     loadTrips().catch((e) => setError(message(e)));
     api<Config>("/config")
       .then(setConfig)
       .catch((e) => setError(message(e)));
-    const load = () =>
-      api<Notice[]>("/notifications")
-        .then(setNotices)
+    const load = () => {
+      const revision = workspaceRevision.current;
+      return api<Notice[]>("/notifications")
+        .then(rows => {
+          if (workspaceRevision.current === revision) {
+            setNotices(rows.filter(row => !unavailableTrips.current.has(row.trip_id)));
+          }
+        })
         .catch(() => {});
+    };
     load();
     // Notifications have their own polling lifecycle, separate from the currently selected trip socket.
     const timer = setInterval(load, 20000);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      workspaceRevision.current += 1;
+    };
   }, [user, loadTrips]);
   // Reflect live changes in the sidebar and keep the selected day inside an edited trip date range.
   useEffect(() => {
@@ -179,7 +277,10 @@ export default function App() {
   }, [trip]);
   useEffect(() => {
     setSelected(null);
+    setLocatingActivity(null);
+    setLocatedActivities({});
     setInvite("");
+    setTransferOpen(false);
     setTab("itinerary");
   }, [id]);
   useEffect(() => {
@@ -187,13 +288,18 @@ export default function App() {
     const t = setTimeout(() => setToast(""), 4500);
     return () => clearTimeout(t);
   }, [toast]);
-  async function run(action: () => Promise<void>) {
+  // Keep confirmation failures local so one operation cannot leak errors into another dialog.
+  function openConfirm(next: Confirm) {
+    setConfirmError("");
+    setConfirm(next);
+  }
+  async function run(action: () => Promise<void>, onError = setError) {
     setBusy(true);
-    setError("");
+    onError("");
     try {
       await action();
     } catch (e) {
-      setError(message(e));
+      onError(message(e));
     } finally {
       setBusy(false);
     }
@@ -223,7 +329,7 @@ export default function App() {
     // Freeze the reviewed trip/version when opening confirmation, even if a live update arrives later.
     const tid = trip.id, version = trip.version;
     setError("");
-    setConfirm({
+    openConfirm({
       title: `Delete "${trip.title}"?`,
       detail: "This permanently deletes the trip, activities, saved places, reservations and shared access for everyone. This cannot be undone.",
       label: "Delete trip",
@@ -241,7 +347,7 @@ export default function App() {
     if (!trip) return;
     const tid = trip.id,
       v = trip.version;
-    setConfirm({
+    openConfirm({
       title: `Delete ${item.title ?? item.name}?`,
       detail: "This removes it from the shared trip for everyone.",
       action: async () => {
@@ -376,7 +482,7 @@ export default function App() {
             aria-label={tr("Sign out")}
             onClick={() => {
               setError("");
-              setConfirm({
+              openConfirm({
                 title: "Sign out?",
                 detail: "Are you sure you want to sign out of your account?",
                 label: "Sign out",
@@ -461,12 +567,12 @@ export default function App() {
                 <Compass size={34} />
               </span>
               <p className="eyebrow">{tr("A WORLD OF POSSIBILITIES")}</p>
-              <h1>{tr("Where are we going?")}</h1>
-              <p>{tr("Give your next adventure a home.")}<br />{tr("Plan the days, save the little details, and invite your people.")}</p>
+              <h1>{tr(trips.length ? "Your trips" : "Where are we going?")}</h1>
+              {trips.length ? <p>{tr("Choose a trip from the sidebar, or start a new adventure.")}</p> : <p>{tr("Give your next adventure a home.")}<br />{tr("Plan the days, save the little details, and invite your people.")}</p>}
               <button
                 onClick={() => setEditing({ kind: "trip", newTrip: true })}
               >
-                <Plus size={17} />{tr("Create your first trip")}</button>
+                <Plus size={17} />{tr(trips.length ? "New trip" : "Create your first trip")}</button>
               <button
                 className="text-button"
                 onClick={() =>
@@ -566,7 +672,7 @@ export default function App() {
                           className={day === d ? "active" : ""}
                           key={d}
                           aria-pressed={day === d}
-                          onClick={() => { setDay(d); setSelected(null); }}
+                          onClick={() => selectDay(d)}
                         >
                           <small><i className="day-color-dot" style={{ backgroundColor: mapDayInfo(d, trip.start_date).color }} aria-hidden="true" />{tr("Day {number}", { number: i + 1 })}</small>
                           {dateLabel(d)}
@@ -580,6 +686,7 @@ export default function App() {
                       <Route size={17} />{tr("Optimize day")}<ArrowRight size={15} />
                     </button>
                   </div>
+                  <OutsideActivities key={trip.id} trip={trip} editable={editable} onSaved={accept} onEdit={activity => setEditing({ kind: "activities", item: activity })} />
                   <div className="planner-grid">
                     <div className="itinerary-panel">
                       <div className="section-heading">
@@ -617,7 +724,7 @@ export default function App() {
                             key={a.id}
                             className={
                               "activity-card" +
-                              (a.place_id && selected === a.place_id
+                              (selected === activityMapId(a)
                                 ? " selected"
                                 : "")
                             }
@@ -627,12 +734,7 @@ export default function App() {
                               <span>{endTime(a.start, a.duration)}</span>
                               <i>{i + 1}</i>
                             </div>
-                            <div
-                              className="activity-content"
-                              onClick={() =>
-                                a.place_id && setSelected(a.place_id)
-                              }
-                            >
+                            <div className="activity-content">
                               <div className="activity-top">
                                 <span className="badge">
                                   {tr(trip.places.find((p) => p.id === a.place_id)?.category ?? "Activity")}
@@ -663,27 +765,11 @@ export default function App() {
                                   </span>
                                 )}
                                 <div className="card-actions">
-                                  {!a.place_id && a.location && editable && (
-                                    <button
-                                      className="text-button"
-                                      onClick={() =>
-                                        setEditing({
-                                          kind: "activities",
-                                          item: a,
-                                        })
-                                      }
-                                    >
-                                      <MapPin size={14} />{tr("Locate on map")}</button>
-                                  )}
-                                  {a.place_id && (
-                                    <button
-                                      className="icon-button"
-                                      aria-label={tr("Show {p0} on map", { p0: a.title })}
-                                      onClick={() => setSelected(a.place_id)}
-                                    >
-                                      <Map size={15} />
-                                    </button>
-                                  )}
+                                  <button className="text-button"
+                                    aria-label={tr("Locate {p0} on map", { p0: a.title })}
+                                    onClick={() => locateActivity(a)}>
+                                    <MapPin size={14} />{tr("Locate on map")}
+                                  </button>
                                   {editable && (
                                     <>
                                       <button
@@ -719,7 +805,7 @@ export default function App() {
                         <p className="end-of-day">{tr("✦ A good day, with room to wander.")}</p>
                       )}
                     </div>
-                    <div className="map-column">
+                    <div className="map-column" ref={mapColumn}>
                       <Suspense
                         fallback={
                           <div className="map-panel loading-page">{tr("Loading map…")}</div>
@@ -733,6 +819,9 @@ export default function App() {
                           day={day}
                           selected={selected}
                           onSelect={selectPlace}
+                          onSelectDay={selectDay}
+                          focusRevision={dayFocusRevision}
+                          locatedActivities={locatedActivities}
                         />
                       </Suspense>
                       <div className="map-bottom">
@@ -960,7 +1049,7 @@ export default function App() {
                     <div>
                       <p className="eyebrow">{tr("BETTER TOGETHER")}</p>
                       <h2>{tr("Your travel crew.")}</h2>
-                      <p>{tr("Owners manage the trip. Editors plan together. Viewers can follow along.")}</p>
+                      <p>{tr("One Manager leads the trip. Editors plan together. Viewers can follow along.")}</p>
                     </div>
                     <button
                       className="secondary"
@@ -1007,10 +1096,10 @@ export default function App() {
                               aria-label={tr("Remove {p0}", { p0: m.name })}
                               onClick={() => {
                                 const version = trip.version;
-                                setConfirm({
+                                openConfirm({
                                   title: `Remove ${m.name}?`,
                                   detail:
-                                    "They will lose access to this shared trip.",
+                                    "He/she will lose access to this shared trip.",
                                   action: async () => {
                                     await api(
                                       `/trips/${trip.id}/members/${m.id}`,
@@ -1028,11 +1117,22 @@ export default function App() {
                             </button>
                           </>
                         ) : (
-                          <span className="badge">{tr(m.role)}</span>
+                          <span className="badge">{tr(m.role === "owner" ? "Manager" : m.role)}</span>
                         )}
                       </div>
                     ))}
                   </div>
+                  {trip.role === "owner" && (
+                    <div className="card manager-card">
+                      <div>
+                        <h3>{tr("Trip management")}</h3>
+                        <p>{tr("To leave this trip, transfer the Manager role to another member first.")}</p>
+                        {trip.members.length < 2 && <p>{tr("Invite someone to join before transferring management.")}</p>}
+                      </div>
+                      <button className="secondary" disabled={busy || connection === "Offline" || trip.members.length < 2}
+                        onClick={() => setTransferOpen(true)}>{tr("Transfer manager")}</button>
+                    </div>
+                  )}
                   {trip.role === "owner" && (
                     <div className="card invite-card">
                       <h3>{tr("Bring a friend.")}</h3>
@@ -1081,7 +1181,6 @@ export default function App() {
                           >{tr("Copy link")}</button>
                         </div>
                       )}
-                      <small>{tr("For a local demo, open the link in a different browser or private window on this Mac. Sharing across devices requires a hosted server or LAN configuration.")}</small>
                     </div>
                   )}
                   {trip.role === "owner" && (
@@ -1090,6 +1189,21 @@ export default function App() {
                       onClick={requestTripDeletion}
                     >
                       <Trash2 size={15} />{tr("Delete trip")}</button>
+                  )}
+                  {trip.role !== "owner" && (
+                    <button
+                      className="secondary danger"
+                      disabled={busy || connection === "Offline"}
+                      onClick={() => openConfirm({
+                        title: "Leave trip?",
+                        detail: "You will lose access to this trip and need a new invitation to rejoin. The trip and everyone's plans will stay.",
+                        label: "Leave trip",
+                        pendingLabel: "Leaving…",
+                        action: () => leave(user.id, trip.version),
+                      })}
+                    >
+                      <LogOut size={16} />{tr("Leave trip")}
+                    </button>
                   )}
                 </section>
               )}
@@ -1132,7 +1246,18 @@ export default function App() {
         accept(await api<Trip>(`/trips/${trip.id}/items/transports` + (item ? `/${item.id}` : ""), item ? "PUT" : "POST", data, version));
         setToast("Travel saved. Your trip is up to date.");
       }} />}
-      {editing && (
+      {locatingActivity && trip && <ActivityLocationLookup
+        key={`${trip.id}:${locatingActivity.id}:${locatingActivity.location}`}
+        trip={trip} activity={locatingActivity} onLocate={locatedActivity}
+        onClose={() => setLocatingActivity(null)} />}
+      {transferOpen && trip?.role === "owner" && <TransferManager key={trip.id} trip={trip}
+        onClose={() => setTransferOpen(false)} onTransferred={next => {
+          accept(next);
+          setTransferOpen(false);
+          setInvite("");
+          setToast("Manager transferred. You are now an Editor and can leave from People.");
+        }} />}
+      {editing && (editing.newTrip || trip) && (
         <Editor
           kind={editing.kind}
           trip={editing.newTrip ? null : trip}
@@ -1150,9 +1275,9 @@ export default function App() {
           }}
         >
           <p>{translateMessage(confirm.detail)}</p>
-          {error && (
+          {confirmError && (
             <div role="alert" className="alert error">
-              {translateMessage(error)}
+              {translateMessage(confirmError)}
             </div>
           )}
           <div className="modal-actions">
@@ -1164,7 +1289,7 @@ export default function App() {
             <button
               className={confirm.destructive === false ? undefined : "danger-button"}
               disabled={busy}
-              onClick={() => run(confirm.action)}
+              onClick={() => run(confirm.action, setConfirmError)}
             >
               {busy
                 ? tr(confirm.pendingLabel ?? "Deleting…")

@@ -2,6 +2,9 @@
 import { tr, translateMessage } from "../i18n";
 import { timeZoneLabel } from "../timeZones";
 import CitySearch from "./CitySearch";
+import DatePreview from "./DatePreview";
+import SavePlaceConfirm from "./SavePlaceConfirm";
+import { dayDifference } from "../tripDates";
 import { useState, useRef, useEffect } from "react";
 import type { FormEvent } from "react";
 import { MapPin, LoaderCircle } from "lucide-react";
@@ -93,6 +96,11 @@ export default function Editor({
   const [data, setData] = useState<Record<string, unknown>>(initial);
   // Do not update this version when trip props change; a stale draft must surface a conflict on save.
   const [version] = useState(trip?.version);
+  const [originalTrip] = useState(trip);
+  const [dateMode, setDateMode] = useState<"" | "keep" | "shift">("");
+  const [pendingPlace, setPendingPlace] = useState<Record<string, unknown> | null>(null);
+  const datesChanged = kind === "trip" && originalTrip &&
+    (data.start_date !== originalTrip.start_date || data.end_date !== originalTrip.end_date);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [newPlace, setNewPlace] = useState<LocationResult | null>(null);
@@ -173,6 +181,7 @@ export default function Editor({
       setData((d) => ({
         ...d,
         place_id: "",
+        map_location: { lat: r.lat, lon: r.lon },
         location: r.address.slice(0, 300),
         title: d.title || r.name.slice(0, 160),
       }));
@@ -219,7 +228,7 @@ export default function Editor({
       setNewPlace(null);
       setUnmapped(false);
       setMatches([]);
-      setData((d) => ({ ...d, location: value, place_id: "" }));
+      setData((d) => ({ ...d, location: value, place_id: "", map_location: null }));
     } else if (kind === "hotels" && key === "address") {
       setData((d) => ({
         ...d,
@@ -283,12 +292,20 @@ export default function Editor({
       if (kind === "trip" && !body.destination_id && (!trip || body.destination !== trip.destination)) {
         throw new Error("Choose a city from the destination results before saving.");
       }
+      if (datesChanged && originalTrip.activities.length) {
+        if (!dateMode) throw new Error("Choose whether to move activities or keep their dates.");
+        body.activity_date_mode = dateMode;
+      }
       if (kind === "activities") {
         body.place_id = body.place_id || null;
-        // The server creates the selected place and activity in one transaction.
-        if (newPlace) body.new_place = placeFromResult(newPlace);
+        // Coordinates belong to the activity; creating a reusable Saved place remains optional.
+        if (newPlace) {
+          body.map_location = { lat: newPlace.lat, lon: newPlace.lon };
+          body.new_place = placeFromResult(newPlace);
+        }
         else if (
           !body.place_id &&
+          !body.map_location &&
           String(body.location ?? "").trim() &&
           !unmapped
         ) {
@@ -318,6 +335,10 @@ export default function Editor({
         body.check_in_time = body.check_in_time || null;
         body.check_out_time = body.check_out_time || null;
       }
+      if ((kind === "activities" && body.new_place) || (kind === "places" && !item)) {
+        setPendingPlace(body);
+        return;
+      }
       await onSave(body, version);
       onClose();
     } catch (e) {
@@ -326,6 +347,26 @@ export default function Editor({
       setBusy(false);
     }
   }
+  async function confirmPlace(saveLocation: boolean) {
+    if (!pendingPlace || busy) return;
+    setBusy(true); setError("");
+    try {
+      const body = { ...pendingPlace };
+      if (!saveLocation) delete body.new_place;
+      await onSave(body, version);
+      onClose();
+    } catch (e) { setError(message(e)); }
+    finally { setBusy(false); }
+  }
+  // Replace the editor dialog while confirming, preserving its draft and version in component state.
+  if (pendingPlace) return <SavePlaceConfirm
+    name={String(kind === "activities" ? (pendingPlace.new_place as Record<string, unknown>).title : pendingPlace.title)}
+    address={String(pendingPlace.location || "")}
+    activity={kind === "activities"} busy={busy} error={error}
+    onConfirm={() => void confirmPlace(true)}
+    onActivityOnly={kind === "activities" ? () => void confirmPlace(false) : undefined}
+    onCancel={() => { setPendingPlace(null); setError(""); }}
+  />;
   const title =
     kind === "trip"
       ? trip
@@ -385,6 +426,14 @@ export default function Editor({
               />
               {field("start_date", "First day", "date")}
               {field("end_date", "Last day", "date")}
+              {datesChanged && originalTrip.activities.length > 0 && <div className="full date-policy">
+                <label>{tr("How should existing activities change?")}<select required value={dateMode} onChange={e => setDateMode(e.target.value as "keep" | "shift")}>
+                  <option value="">{tr("Choose a date option")}</option>
+                  <option value="shift">{tr("Move flexible activities with the trip")}</option>
+                  <option value="keep">{tr("Keep all activity dates")}</option>
+                </select></label>
+                {dateMode && data.start_date && data.end_date ? <DatePreview activities={originalTrip.activities} delta={dateMode === "shift" ? dayDifference(originalTrip.start_date, String(data.start_date)) : 0} start={String(data.start_date)} end={String(data.end_date)} /> : null}
+              </div>}
               <label>{tr("Time zone")}<input value={timeZoneLabel(String(data.timezone ?? ""))} readOnly placeholder={tr("Choose a destination first")} />
               </label>
               <p className="field-help">{tr("Set from your selected city, including daylight saving time.")}{trip && tr(" Reselect your city to update its time zone. Existing activities keep their local clock times.")}
@@ -403,6 +452,7 @@ export default function Editor({
                     setData((d) => ({
                       ...d,
                       place_id: e.target.value,
+                      map_location: p ? { lat: p.lat, lon: p.lon } : null,
                       ...(p
                         ? {
                             title: p.title,
@@ -423,7 +473,7 @@ export default function Editor({
               </label>
               {field("title", "Activity title")}
               {field("location", "Address or place name", "text", false)}
-              {!data.place_id && !newPlace && (
+              {!data.place_id && !newPlace && !data.map_location && (
                 <div className="full">
                   {matches.map((r, i) => (
                     <button

@@ -4,16 +4,22 @@ import { useEffect, useRef, useState } from "react";
 import { loadGoogleMaps } from "../googleMaps";
 import type { MapProps } from "./MapView";
 import { createMapPin } from "../mapPins";
+import { cameraRequest, CameraController } from "../mapCamera";
 export default function GoogleMap({
   plan,
   selected,
   onSelect,
   preview,
   destination,
+  trip,
+  overview,
+  savedOverview,
+  focusRevision,
   onError,
 }: MapProps & { onError: () => void }) {
   const container = useRef<HTMLDivElement>(null);
   const map = useRef<google.maps.Map | null>(null);
+  const camera = useRef(new CameraController());
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let active = true;
@@ -21,6 +27,11 @@ export default function GoogleMap({
       if (active) onError();
     };
     window.addEventListener("tripboard-google-error", fail);
+    const canvas = container.current;
+    const interact = () => camera.current.interact();
+    canvas?.addEventListener("pointerdown", interact);
+    canvas?.addEventListener("wheel", interact, { passive: true });
+    canvas?.addEventListener("keydown", interact);
     loadGoogleMaps()
       .then(() => {
         if (!active || !container.current) return;
@@ -33,12 +44,17 @@ export default function GoogleMap({
           fullscreenControl: false,
           gestureHandling: "cooperative",
         });
+        map.current.addListener("dragstart", () => camera.current.interact());
         setLoaded(true);
       })
       .catch(fail);
     return () => {
       active = false;
       window.removeEventListener("tripboard-google-error", fail);
+      canvas?.removeEventListener("pointerdown", interact);
+      canvas?.removeEventListener("wheel", interact);
+      canvas?.removeEventListener("keydown", interact);
+      if (map.current) google.maps.event.clearInstanceListeners(map.current);
       map.current = null;
     };
   }, [onError]);
@@ -46,8 +62,6 @@ export default function GoogleMap({
     const m = map.current;
     if (!m || !loaded) return;
     const { points } = plan;
-    const bounds = new google.maps.LatLngBounds();
-    points.forEach(point => bounds.extend({ lat: point.lat, lng: point.lon }));
     const markers = points.map((p) => {
       const el = createMapPin(p, selected, onSelect);
       const position = { lat: p.lat, lng: p.lon };
@@ -71,51 +85,31 @@ export default function GoogleMap({
         offset: "0", repeat: "12px",
       }],
     }));
-    const focus = preview || points.find((p) => p.id === selected);
-    let destinationListener: google.maps.MapsEventListener | undefined;
-    if (focus) {
-      m.panTo({ lat: focus.lat, lng: focus.lon });
-      m.setZoom(14);
-    } else if (points.length === 1) {
-      m.setCenter(bounds.getCenter());
-      m.setZoom(14);
-    } else if (points.length) m.fitBounds(bounds, 70);
-    else if (destination) {
-      if (destination.bounds) {
-        const [south, north, west, east] = destination.bounds;
-        m.fitBounds({ south, north, west, east }, 40);
-        destinationListener = google.maps.event.addListenerOnce(
-          m,
-          "idle",
-          () => {
-            if ((m.getZoom() ?? 0) > 12) m.setZoom(12);
-          },
-        );
-      } else {
-        m.setCenter({ lat: destination.lat, lng: destination.lon });
-        m.setZoom(11);
-      }
-    } else {
-      m.setCenter({ lat: 20, lng: 0 });
-      m.setZoom(1);
-    }
     return () => {
-      if (destinationListener)
-        google.maps.event.removeListener(destinationListener);
       // Detach overlays on rerender/unmount so stale markers and routes cannot remain visible.
       markers.forEach((marker) => {
         marker.map = null;
       });
       lines.forEach(line => line.setMap(null));
     };
-  }, [
-    loaded,
-    plan,
-    selected,
-    preview,
-    destination,
-    onSelect,
-  ]);
+  }, [loaded, plan, selected, onSelect]);
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !loaded) return;
+    const target = camera.current.next(cameraRequest({ plan, tripId: trip.id, city: trip.destination, selected, preview, destination, overview, savedOverview, focusRevision }));
+    if (!target) return;
+    if (target.kind === "point") {
+      m.panTo({ lat: target.lat, lng: target.lon });
+      m.setZoom(target.zoom);
+    } else if (target.kind === "bounds") {
+      const bounds = new google.maps.LatLngBounds();
+      target.coordinates.forEach(([lng, lat]) => bounds.extend({ lat, lng }));
+      // Apply the cap before fitting, avoiding asynchronous idle callbacks that can undo a gesture.
+      m.setOptions({ maxZoom: target.maxZoom });
+      m.fitBounds(bounds, target.padding);
+      m.setOptions({ maxZoom: null });
+    }
+  }, [plan, loaded, selected, preview, destination, trip.id, trip.destination, overview, savedOverview, focusRevision]);
   return (
     <div className="map-panel">
       <div className="map-canvas" ref={container} />
